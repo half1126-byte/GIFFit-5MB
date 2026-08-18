@@ -1,0 +1,36 @@
+GIFFit Third-Party Notices
+==========================
+
+This distribution bundles the following command-line tools.
+
+1. FFmpeg 9.0.1 Essentials Build
+   Project: https://ffmpeg.org/
+   Windows build: https://www.gyan.dev/ffmpeg/builds/
+   Release source: https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz
+   License: GNU GPL version 3
+   The complete license text and build README are included in the licenses folder.
+   Corresponding FFmpeg source reference for this build is listed by the build provider.
+
+2. Gifsicle 1.95
+   Project: https://www.lcdf.org/gifsicle/
+   Source: https://github.com/kohler/gifsicle
+   Release source: https://github.com/kohler/gifsicle/releases/tag/v1.95
+   License: GNU GPL version 2
+   The complete license text is included in the licenses folder.
+
+3. PyInstaller bootloader/runtime
+   Project: https://pyinstaller.org/
+   License: GPL 2.0 with a special exception permitting distribution of bundled applications.
+
+4. CPython 3.12 runtime
+   Project and source: https://www.python.org/
+   License: Python Software Foundation License Version 2
+   The complete Python license is included in the licenses folder.
+
+5. Tcl/Tk 8.6 runtime
+   Project and source: https://www.tcl.tk/
+   License: BSD-style Tcl/Tk license
+   The complete Tcl/Tk license terms are included in the licenses folder.
+
+GIFFit invokes FFmpeg and Gifsicle as separate subprocesses. No warranties are provided by the
+third-party projects or build providers. See each bundled license for complete terms.
