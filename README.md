@@ -18,7 +18,7 @@ GIFFit은 MP4·MOV·AVI·MKV·WebM 영상을 파일당 최대 `5,000,000 bytes`�
 
 ## 사용법
 
-1. [Releases](https://github.com/half1126-byte/GIFFit-5MB/releases)에서 `GIFFit_5MB_Windows_Portable_v1.0.0.zip`을 받습니다.
+1. [Releases](https://github.com/half1126-byte/GIFFit-5MB/releases)에서 `GIFFit_5MB_Windows_Portable_v1.0.1.zip`을 받습니다.
 2. ZIP을 완전히 압축 해제합니다.
 3. `GIFFit_5MB\GIFFit_5MB.exe`를 실행합니다. `_internal` 폴더는 EXE와 함께 보관해야 합니다.
 4. 영상을 추가하고 저장 위치와 품질 모드를 선택한 뒤 변환을 시작합니다.

@@ -613,6 +613,13 @@ class GifFitApp:
         )
         self.add_button.pack(side="right", padx=22)
 
+        # Reserve the action footer before the expanding content area.  Tk's
+        # packer allocates parcels in packing order; placing an oversized
+        # content request first can otherwise leave the start/cancel controls
+        # unmapped on the default 720px-high window.
+        footer = tk.Frame(outer, bg=self.BG)
+        footer.pack(side="bottom", fill="x", pady=(14, 0))
+
         content = tk.Frame(outer, bg=self.BG)
         content.pack(fill="both", expand=True)
         content.grid_columnconfigure(0, weight=1)
@@ -667,25 +674,70 @@ class GifFitApp:
                 anchor=anchors[column],
                 stretch=column in {"name", "source", "result", "status"},
             )
-        scrollbar = self.ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree_scrollbar = self.ttk.Scrollbar(
+            tree_frame, orient="vertical", command=self.tree.yview
+        )
+        self.tree.configure(yscrollcommand=self.tree_scrollbar.set)
+        self.tree_scrollbar.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
         self.tree.tag_configure("done", foreground=self.ACCENT_DARK)
         self.tree.tag_configure("failed", foreground=self.ERROR)
         self.tree.tag_configure("active", background="#F0F8F5")
         self.tree.bind("<Double-1>", self._on_tree_double_click)
         self.tree.bind("<<TreeviewSelect>>", lambda _event: self._refresh_controls())
 
-        settings = tk.Frame(content, bg=self.PANEL, highlightthickness=1, highlightbackground=self.LINE)
-        settings.grid(row=0, column=1, sticky="nsew")
+        settings_panel = tk.Frame(
+            content,
+            bg=self.PANEL,
+            highlightthickness=1,
+            highlightbackground=self.LINE,
+        )
+        settings_panel.grid(row=0, column=1, sticky="nsew")
         tk.Label(
-            settings,
+            settings_panel,
             text="변환 설정",
             bg=self.PANEL,
             fg=self.INK,
             font=(self.font_family, 12, "bold"),
         ).pack(anchor="w", padx=18, pady=(17, 14))
+
+        settings_body = tk.Frame(settings_panel, bg=self.PANEL)
+        settings_body.pack(fill="both", expand=True)
+        self.settings_scrollbar = self.ttk.Scrollbar(settings_body, orient="vertical")
+        self.settings_scrollbar.pack(side="right", fill="y")
+        self.settings_canvas = tk.Canvas(
+            settings_body,
+            bg=self.PANEL,
+            width=272,
+            bd=0,
+            highlightthickness=0,
+            takefocus=True,
+            yscrollcommand=self.settings_scrollbar.set,
+        )
+        self.settings_canvas.pack(side="left", fill="both", expand=True)
+        self.settings_scrollbar.configure(command=self.settings_canvas.yview)
+        settings = tk.Frame(self.settings_canvas, bg=self.PANEL)
+        self.settings_inner = settings
+        self.settings_window = self.settings_canvas.create_window(
+            (0, 0), window=settings, anchor="nw"
+        )
+        settings.bind(
+            "<Configure>",
+            lambda _event: self.settings_canvas.configure(
+                scrollregion=self.settings_canvas.bbox("all")
+            ),
+        )
+        self.settings_canvas.bind(
+            "<Configure>",
+            lambda event: self.settings_canvas.itemconfigure(
+                self.settings_window, width=event.width
+            ),
+        )
+        self.settings_canvas.bind("<Prior>", lambda event: self._scroll_settings(event, -1, "pages"))
+        self.settings_canvas.bind("<Next>", lambda event: self._scroll_settings(event, 1, "pages"))
+        self.settings_canvas.bind("<Home>", lambda event: self._scroll_settings_to(event, 0.0))
+        self.settings_canvas.bind("<End>", lambda event: self._scroll_settings_to(event, 1.0))
+        self.root.bind("<MouseWheel>", self._on_settings_mousewheel, add="+")
 
         self._field_label(settings, "파일당 최대 용량")
         size_row = tk.Frame(settings, bg=self.PANEL)
@@ -767,7 +819,7 @@ class GifFitApp:
         self.open_output_button.pack(side="right")
 
         note = tk.Frame(settings, bg="#F7F4EA", highlightthickness=1, highlightbackground="#E7DFC6")
-        note.pack(side="bottom", fill="x", padx=18, pady=18)
+        note.pack(fill="x", padx=18, pady=18)
         tk.Label(
             note,
             text="GIF 안내",
@@ -785,10 +837,7 @@ class GifFitApp:
             wraplength=238,
         ).pack(anchor="w", padx=10, pady=(0, 9))
 
-        footer = tk.Frame(outer, bg=self.BG)
-        footer.pack(fill="x", pady=(14, 0))
         progress_block = tk.Frame(footer, bg=self.BG)
-        progress_block.pack(side="left", fill="x", expand=True, padx=(0, 18))
         tk.Label(
             progress_block,
             textvariable=self.status_var,
@@ -816,8 +865,70 @@ class GifFitApp:
             width=18,
         )
         self.start_button.pack(side="right", pady=4)
+        progress_block.pack(side="left", fill="x", expand=True, padx=(0, 18))
+
+        for widget in (
+            self.limit_entry,
+            self.safe_check,
+            self.quality_combo,
+            self.pick_output_button,
+            self.open_output_button,
+        ):
+            widget.bind(
+                "<FocusIn>",
+                lambda event: self.root.after_idle(
+                    lambda target=event.widget: self._reveal_settings_widget(target)
+                ),
+                add="+",
+            )
 
         self._refresh_controls()
+
+    def _scroll_settings(self, _event: Any, amount: int, units: str) -> str:
+        self.settings_canvas.yview_scroll(amount, units)
+        return "break"
+
+    def _scroll_settings_to(self, _event: Any, fraction: float) -> str:
+        self.settings_canvas.yview_moveto(fraction)
+        return "break"
+
+    def _on_settings_mousewheel(self, event: Any) -> str | None:
+        canvas = self.settings_canvas
+        pointer_x, pointer_y = canvas.winfo_pointerxy()
+        left = canvas.winfo_rootx()
+        top = canvas.winfo_rooty()
+        if not (
+            left <= pointer_x < left + canvas.winfo_width()
+            and top <= pointer_y < top + canvas.winfo_height()
+        ):
+            return None
+        delta = int(getattr(event, "delta", 0))
+        if delta == 0:
+            return None
+        canvas.yview_scroll(-1 if delta > 0 else 1, "units")
+        return "break"
+
+    def _reveal_settings_widget(self, widget: Any) -> None:
+        """Scroll a keyboard-focused setting fully into the visible viewport."""
+        if not widget.winfo_exists() or not self.settings_canvas.winfo_exists():
+            return
+        self.root.update_idletasks()
+        canvas = self.settings_canvas
+        viewport_height = canvas.winfo_height()
+        if viewport_height <= 1:
+            return
+        widget_top = widget.winfo_rooty() - self.settings_inner.winfo_rooty()
+        widget_bottom = widget_top + widget.winfo_height()
+        view_top = float(canvas.canvasy(0))
+        view_bottom = view_top + viewport_height
+        if widget_top >= view_top and widget_bottom <= view_bottom:
+            return
+        scrollregion = canvas.bbox("all")
+        if not scrollregion:
+            return
+        content_height = max(1, scrollregion[3] - scrollregion[1])
+        target_top = widget_top if widget_top < view_top else widget_bottom - viewport_height
+        canvas.yview_moveto(max(0.0, min(1.0, target_top / content_height)))
 
     def _button(
         self,
@@ -1123,8 +1234,6 @@ class GifFitApp:
                         progress_callback,
                         self.cancel_event,
                     )
-                    if self.cancel_event.is_set():
-                        raise CancelledError("사용자가 변환을 중지했습니다.")
                     resolved_output = value_from(result, "output_path", "path", "gif_path", default=output_path)
                     resolved_output = Path(resolved_output)
                     if not resolved_output.is_file():
@@ -1361,6 +1470,20 @@ class GifFitApp:
             self.root.protocol("WM_DELETE_WINDOW", lambda: None)
             self.root.after(50, self._wait_for_shutdown)
             return
+        self.closing = True
+        self._destroy_root()
+
+    def _destroy_root(self) -> None:
+        """Cancel queued Tk callbacks before destroying the interpreter."""
+        try:
+            pending_jobs = self.root.tk.splitlist(self.root.tk.call("after", "info"))
+        except self.tk.TclError:
+            pending_jobs = ()
+        for job in pending_jobs:
+            try:
+                self.root.after_cancel(job)
+            except self.tk.TclError:
+                pass
         self.root.destroy()
 
     def _wait_for_shutdown(self) -> None:
@@ -1368,7 +1491,7 @@ class GifFitApp:
         if self.worker_thread is not None and self.worker_thread.is_alive():
             threads.append(self.worker_thread)
         if not threads or time.monotonic() >= self.shutdown_deadline:
-            self.root.destroy()
+            self._destroy_root()
             return
         self.root.after(100, self._wait_for_shutdown)
 
@@ -1401,7 +1524,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cli", action="store_true", help="GUI 대신 JSON CLI 실행")
     parser.add_argument("inputs", nargs="*", metavar="INPUT", help="입력 영상 파일")
     parser.add_argument("--output-dir", type=Path, help="GIF 저장 폴더")
-    parser.add_argument("--limit-bytes", type=int, default=DEFAULT_LIMIT_BYTES, help="파일당 최대 바이트")
+    parser.add_argument(
+        "--limit-bytes",
+        type=int,
+        default=DEFAULT_LIMIT_BYTES,
+        help="파일당 최대 바이트 (최대 5,000,000)",
+    )
     parser.add_argument(
         "--quality",
         choices=("balanced", "quality", "resolution"),
@@ -1428,8 +1556,10 @@ def run_cli(args: argparse.Namespace) -> int:
         payload["errors"].append({"error": "--output-dir를 지정해 주세요."})
         print(json.dumps(payload, ensure_ascii=True))
         return 2
-    if args.limit_bytes <= 0:
-        payload["errors"].append({"error": "--limit-bytes는 0보다 커야 합니다."})
+    if not (0 < args.limit_bytes <= DEFAULT_LIMIT_BYTES):
+        payload["errors"].append(
+            {"error": "--limit-bytes는 1~5,000,000 사이여야 합니다."}
+        )
         print(json.dumps(payload, ensure_ascii=True))
         return 2
 

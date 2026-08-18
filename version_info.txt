@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(1, 0, 1, 0),
+    prodvers=(1, 0, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -14,11 +14,11 @@ VSVersionInfo(
       StringTable('041204B0', [
         StringStruct('CompanyName', 'GIFFit'),
         StringStruct('FileDescription', '5MB 이하 자동 GIF 변환기'),
-        StringStruct('FileVersion', '1.0.0'),
+        StringStruct('FileVersion', '1.0.1'),
         StringStruct('InternalName', 'GIFFit_5MB'),
         StringStruct('OriginalFilename', 'GIFFit_5MB.exe'),
         StringStruct('ProductName', 'GIFFit'),
-        StringStruct('ProductVersion', '1.0.0')
+        StringStruct('ProductVersion', '1.0.1')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [0x0412, 1200])])

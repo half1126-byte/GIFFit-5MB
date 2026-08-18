@@ -27,6 +27,7 @@ from typing import Any, Callable, Generic, Mapping, Sequence, TypeVar
 
 
 ProgressCallback = Callable[[str, float | None, str, dict[str, Any]], None]
+_GLOBAL_LIMIT_BYTES = 5_000_000
 
 
 class ConversionError(RuntimeError):
@@ -46,6 +47,7 @@ class ProbeInfo:
     fps: float
     frame_count: int
     rotation: int
+    stream_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,11 @@ class ConversionSettings:
     def __post_init__(self) -> None:
         if self.limit_bytes <= 0:
             raise ValueError("limit_bytes must be greater than zero")
+        if self.limit_bytes > _GLOBAL_LIMIT_BYTES:
+            raise ValueError(
+                "limit_bytes cannot exceed the global maximum of "
+                f"{_GLOBAL_LIMIT_BYTES:,} bytes"
+            )
         if not 0 < self.safe_ratio <= 1:
             raise ValueError("safe_ratio must be greater than 0 and at most 1")
         if self.quality_mode not in {"quality", "balanced", "resolution"}:
@@ -176,13 +183,33 @@ def _positive_int(value: Any) -> int:
 
 
 def _normalise_rotation(value: Any) -> int:
+    if value is None:
+        return 0
     try:
         degrees = float(value)
     except (TypeError, ValueError):
-        return 0
+        raise ConversionError(f"Invalid display rotation metadata: {value!r}")
     if not math.isfinite(degrees):
-        return 0
-    return int(round(degrees / 90.0) * 90) % 360
+        raise ConversionError(f"Invalid display rotation metadata: {value!r}")
+    quarter_turns = round(degrees / 90.0)
+    nearest_supported = quarter_turns * 90.0
+    if not math.isclose(degrees, nearest_supported, rel_tol=0.0, abs_tol=1e-3):
+        raise ConversionError(
+            "Unsupported display rotation "
+            f"{degrees:g} degrees; only multiples of 90 degrees are supported"
+        )
+    return int(nearest_supported) % 360
+
+
+def _disposition_is_set(stream: Mapping[str, Any], name: str) -> bool:
+    disposition = stream.get("disposition")
+    if not isinstance(disposition, Mapping):
+        return False
+    value = disposition.get(name)
+    try:
+        return int(value) != 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _parse_probe_payload(payload: Mapping[str, Any], path: str | Path) -> ProbeInfo:
@@ -191,9 +218,31 @@ def _parse_probe_payload(payload: Mapping[str, Any], path: str | Path) -> ProbeI
     streams = payload.get("streams")
     if not isinstance(streams, list) or not streams:
         raise ConversionError("No decodable video stream was found")
-    stream = streams[0]
-    if not isinstance(stream, Mapping):
-        raise ConversionError("FFprobe returned invalid stream metadata")
+    candidates: list[tuple[Mapping[str, Any], int]] = []
+    for candidate in streams:
+        if not isinstance(candidate, Mapping):
+            continue
+        if _disposition_is_set(candidate, "attached_pic"):
+            continue
+        try:
+            stream_index = int(candidate.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if stream_index < 0:
+            continue
+        candidates.append((candidate, stream_index))
+
+    if not candidates:
+        raise ConversionError("No decodable non-attached video stream was found")
+
+    stream, stream_index = next(
+        (
+            candidate
+            for candidate in candidates
+            if _disposition_is_set(candidate[0], "default")
+        ),
+        candidates[0],
+    )
 
     width = _positive_int(stream.get("width"))
     height = _positive_int(stream.get("height"))
@@ -242,6 +291,7 @@ def _parse_probe_payload(payload: Mapping[str, Any], path: str | Path) -> ProbeI
         fps=fps,
         frame_count=frame_count,
         rotation=_normalise_rotation(rotation_value),
+        stream_index=stream_index,
     )
 
 
@@ -612,12 +662,13 @@ class ConversionEngine:
                 "error",
                 "-count_frames",
                 "-select_streams",
-                "v:0",
+                "v",
                 "-show_entries",
                 (
-                    "stream=width,height,avg_frame_rate,r_frame_rate,duration,"
+                    "stream=index,width,height,avg_frame_rate,r_frame_rate,duration,"
                     "nb_frames,nb_read_frames:stream_tags=rotate:"
-                    "stream_side_data=rotation:format=duration"
+                    "stream_side_data=rotation:"
+                    "stream_disposition=default,attached_pic:format=duration"
                 ),
                 "-of",
                 "json",
@@ -651,7 +702,11 @@ class ConversionEngine:
         return info
 
     @staticmethod
-    def _filter_graph(width: int, height: int, *, srgb: bool) -> str:
+    def _filter_graph(
+        width: int, height: int, *, srgb: bool, stream_index: int = 0
+    ) -> str:
+        if stream_index < 0:
+            raise ValueError("stream_index cannot be negative")
         scale = (
             f"scale=w={width}:h={height}:"
             "flags=lanczos+accurate_rnd:in_range=auto:out_range=full"
@@ -664,7 +719,7 @@ class ConversionEngine:
         else:
             colour = f"{scale},format=rgb24"
         return (
-            f"[0:v:0]{colour},split=2[v][p0];"
+            f"[0:{stream_index}]{colour},split=2[v][p0];"
             "[p0]palettegen=max_colors=256:reserve_transparent=1:"
             "stats_mode=full[p];"
             "[v][p]paletteuse=dither=floyd_steinberg:"
@@ -719,7 +774,12 @@ class ConversionEngine:
                 "-i",
                 str(source),
                 "-filter_complex",
-                self._filter_graph(width, height, srgb=srgb),
+                self._filter_graph(
+                    width,
+                    height,
+                    srgb=srgb,
+                    stream_index=info.stream_index,
+                ),
                 "-map",
                 "[out]",
                 "-an",
@@ -885,7 +945,12 @@ class ConversionEngine:
                 )
 
         gifsicle_info_result = self._run(
-            [self.gifsicle_path, "--info", str(candidate.path)],
+            [
+                self.gifsicle_path,
+                "--no-ignore-errors",
+                "--info",
+                str(candidate.path),
+            ],
             stage="validate",
             message="Checking GIF animation metadata",
             details={"path": str(candidate.path)},
@@ -898,12 +963,13 @@ class ConversionEngine:
         if parsed_info.frames is not None and parsed_info.frames != final_info.frame_count:
             raise ConversionError("GIF logical image count is inconsistent")
 
-        self._run(
+        decode_result = self._run(
             [
                 self.ffmpeg_path,
                 "-v",
                 "error",
                 "-nostdin",
+                "-xerror",
                 "-i",
                 str(candidate.path),
                 "-map",
@@ -917,6 +983,14 @@ class ConversionEngine:
             message="Fully decoding the final GIF",
             details={"path": str(candidate.path)},
         )
+        decode_diagnostic = decode_result.stderr.strip()
+        if decode_diagnostic:
+            if len(decode_diagnostic) > 4_000:
+                decode_diagnostic = decode_diagnostic[-4_000:]
+            raise ConversionError(
+                "FFmpeg reported an error while fully decoding the final GIF: "
+                f"{decode_diagnostic}"
+            )
         self._emit(
             "validate",
             1.0,
@@ -937,10 +1011,48 @@ class ConversionEngine:
         )
 
     @staticmethod
+    def _stage_candidate(candidate_path: Path, output_dir: Path) -> Path:
+        """Move a validated result to a hidden same-volume staging file."""
+
+        staging_path: Path | None = None
+        descriptor = -1
+        try:
+            descriptor, staging_name = tempfile.mkstemp(
+                prefix=".giffit-ready-", suffix=".gif", dir=str(output_dir)
+            )
+            staging_path = Path(staging_name)
+            os.close(descriptor)
+            descriptor = -1
+            os.replace(candidate_path, staging_path)
+            return staging_path
+        except OSError as exc:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if staging_path is not None:
+                try:
+                    staging_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise ConversionError(f"Could not stage the final GIF: {exc}") from exc
+
+    @staticmethod
+    def _discard_staging(staging_path: Path | None) -> None:
+        if staging_path is None:
+            return
+        try:
+            staging_path.unlink(missing_ok=True)
+        except OSError:
+            # A dot-prefixed staging file is never a published user result.
+            pass
+
+    @staticmethod
     def _publish(candidate_path: Path, output_dir: Path, input_path: Path) -> Path:
-        # The task temp directory is created inside output_dir, so rename is an
-        # atomic same-volume operation on Windows.  Windows rename refuses to
-        # replace an existing destination, preserving every prior result.
+        # Staging is created inside output_dir, so rename is an atomic
+        # same-volume operation on Windows.  Windows rename refuses to replace
+        # an existing destination, preserving every prior result.
         for _ in range(10_000):
             destination = _unique_output_path(output_dir, input_path)
             try:
@@ -995,51 +1107,70 @@ class ConversionEngine:
         except OSError as exc:
             raise ConversionError(f"Could not create conversion workspace: {exc}") from exc
 
-        with temp_context as temp_name:
-            temp_dir = Path(temp_name)
+        staged_path: Path | None = None
+        selected: _Candidate | None = None
+        try:
+            with temp_context as temp_name:
+                temp_dir = Path(temp_name)
 
-            def evaluate(width: int) -> _Candidate:
-                nonlocal attempts
+                def evaluate(width: int) -> _Candidate:
+                    nonlocal attempts
+                    self._check_cancelled()
+                    attempts += 1
+                    self._emit(
+                        "search",
+                        None,
+                        f"Testing width {width}px",
+                        {"attempt": attempts, "width": width},
+                    )
+                    return self._build_candidate(
+                        source, info, width, temp_dir, settings, attempts
+                    )
+
+                try:
+                    outcome = _adaptive_search(
+                        widths,
+                        evaluate,
+                        target_limit=safe_limit,
+                        hard_limit=settings.limit_bytes,
+                    )
+                except _NoFitError as exc:
+                    raise ConversionError(
+                        "The video cannot fit within "
+                        f"{settings.limit_bytes:,} bytes while preserving every frame "
+                        f"at the minimum width of {minimum_width}px. "
+                        f"The minimum candidate was {exc.smallest_size:,} bytes."
+                    ) from exc
+
+                selected = self._validate_candidate(outcome.best, info, settings)
                 self._check_cancelled()
-                attempts += 1
-                self._emit(
-                    "search",
-                    None,
-                    f"Testing width {width}px",
-                    {"attempt": attempts, "width": width},
-                )
-                return self._build_candidate(
-                    source, info, width, temp_dir, settings, attempts
-                )
+                staged_path = self._stage_candidate(selected.path, destination_dir)
+        except BaseException:
+            self._discard_staging(staged_path)
+            raise
 
-            try:
-                outcome = _adaptive_search(
-                    widths,
-                    evaluate,
-                    target_limit=safe_limit,
-                    hard_limit=settings.limit_bytes,
-                )
-            except _NoFitError as exc:
-                raise ConversionError(
-                    "The video cannot fit within "
-                    f"{settings.limit_bytes:,} bytes while preserving every frame "
-                    f"at the minimum width of {minimum_width}px. "
-                    f"The minimum candidate was {exc.smallest_size:,} bytes."
-                ) from exc
-
-            selected = self._validate_candidate(outcome.best, info, settings)
+        assert selected is not None
+        assert staged_path is not None
+        try:
+            # Cleanup of the TemporaryDirectory has completed at this point.
+            # Recheck cancellation before making the result publicly visible.
             self._check_cancelled()
-            output_path = self._publish(selected.path, destination_dir, source)
-            result = ConversionResult(
-                input_path=source,
-                output_path=output_path,
-                width=selected.width,
-                height=selected.height,
-                size_bytes=selected.size_bytes,
-                frames=selected.frames,
-                duration=selected.duration,
-                attempts=attempts,
-            )
+            output_path = self._publish(staged_path, destination_dir, source)
+            staged_path = None
+        except BaseException:
+            self._discard_staging(staged_path)
+            raise
+
+        result = ConversionResult(
+            input_path=source,
+            output_path=output_path,
+            width=selected.width,
+            height=selected.height,
+            size_bytes=selected.size_bytes,
+            frames=selected.frames,
+            duration=selected.duration,
+            attempts=attempts,
+        )
 
         self._emit(
             "complete",
